@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>明日方舟 LOGO 风格生成器</title>
+  <style>
+    @font-face {
+      font-family: "FZYaSongBold";
+      src: url("./Fangzheng.ttf") format("truetype");
+      font-display: swap;
+    }
+
+    :root{
+      --tile: 256px; /* 网格中单个画布展示宽度（会在 JS 中动态更新） */
+    }
+
+    html,body{height:100%}
+    body{
+      margin:0; background:#0b0f14; color:#e6edf3;
+      font:16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Noto Sans, "FZYaSongBold", Arial, sans-serif;
+      display:flex; flex-direction:column; gap:16px; align-items:center;
+    }
+    header{ padding:20px 0 0 0; text-align:center; width:100%}
+    header h1{margin:0 0 6px; font-size:22px; font-weight:700}
+
+    .panel{
+      background:#0f1722; border:1px solid #1f2a3a; border-radius:14px; padding:16px;
+      width:min(1222px, 95vw); margin:0 auto; box-shadow:0 10px 30px rgba(0,0,0,.25)
+    }
+    .controls{display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:center}
+    .controls input[type="text"]{
+      flex:1; min-width:220px; padding:10px 12px; border-radius:10px; border:1px solid #20354c; background:#0b1320; color:#e6edf3; outline: none;
+    }
+    .controls .field{display:flex; align-items:center; gap:6px}
+    .controls input[type="number"], .controls select{
+      width:120px; padding:8px 10px; border-radius:10px; border:1px solid #20354c; background:#0b1320; color:#e6edf3;
+    }
+    .controls button{
+      padding:10px 14px; border-radius:10px; border:1px solid #27415b; background:#18263a; color:#e6edf3; cursor:pointer; font-weight:600;
+    }
+    .controls button:hover{filter:brightness(1.06)}
+
+    .grid{
+      display:grid; grid-template-columns: repeat(auto-fill, minmax(var(--tile), 1fr));
+      gap:12px; margin-top:14px; justify-items:center; /* 卡片居中 */
+    }
+    .card{
+      background:#0b1320; border:1px solid #1f2a3a; border-radius:12px; padding:10px;
+      display:flex; flex-direction:column; align-items:center; gap:8px;
+    }
+    .card label{opacity:.75; font-size:12px}
+    canvas.tile{
+      width:auto;
+      height:auto;
+      display:block;
+      border-radius:10px;
+      border:1px solid #1f2a3a;
+      object-fit:contain;    /* 保险：将来若有变化也保持等比 */
+    }
+
+    .scroller{
+      overflow:auto; max-width:100%; margin-top:14px; border-radius:12px; border:1px solid #1f2a3a;
+      display:flex; justify-content:center; /* 拼接图容器居中 */
+      background:#0b1320;
+    }
+    .scroller canvas{ display:block; }
+
+    footer{opacity:.6; text-align:center; padding:6px 16px 20px}
+    code{background:#0b1320; padding:2px 6px; border-radius:6px; border:1px solid #1f2a3a}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>明日方舟 LOGO 风格生成器</h1>
+  </header>
+
+  <section class="panel">
+    <div class="controls">
+      <input id="textInput" type="text" placeholder="输入文本" value="—明日方舟—" />
+      <div class="field">
+        <input id="perGlyph" type="checkbox" />
+        <label for="perGlyph">单字输出</label>
+      </div>
+
+      <!-- 新：字距数组（相邻间隔，长度 n-1） -->
+      <div class="field">
+        <label for="kernings">字距(数组, px)</label>
+        <input id="kernings" type="text" placeholder="-10,0,-20,-40,-10" value="-10,0,-20,-40,-10" />
+      </div>
+      <!-- 新：逐字上下偏移数组（长度 n） -->
+      <div class="field">
+        <label for="yOffsets">上下(数组, px)</label>
+        <input id="yOffsets" type="text" placeholder="-100,-100,-130,-40,-100,-60" value="-100,-100,-130,-40,-100,-60" />
+      </div>
+
+      <div class="field">
+        <label for="scale">大小(%)</label>
+        <input id="scale" type="number" step="1" min="50" max="400" value="100" />
+      </div>
+      <div class="field">
+        <label for="bgFill">背景</label>
+        <select id="bgFill">
+          <option value="white" selected>白色</option>
+          <option value="transparent">透明</option>
+        </select>
+      </div>
+      <!-- 只保留拼接下载按钮（单字模式每卡片有独立下载） -->
+      <button type="button" id="downloadConcatBtn" style="display:none">下载拼接图</button>
+    </div>
+
+    <div id="grid" class="grid" aria-live="polite"></div>
+    <div id="concatWrap" class="scroller" style="display:none">
+      <canvas id="concatCanvas"></canvas>
+    </div>
+  </section>
+
+  <footer>斜切比例 K=0.31 SCALE(0.82, 1.08)</footer>
+
+<script>
+(async function(){
+  /* ======================== 样式/算法参数 ======================== */
+  const k = 0.31;               // 剪切强度（用于 skewY）
+  const SHIFT_Y = 40;           // 绝对像素下移
+  const SCALE_X = 0.82;         // 字形横向风格缩放
+  const SCALE_Y = 1.08;         // 字形纵向风格缩放
+  const BASE_FONT_PX = 512;     // 基准绘制字号
+  const SHEAR_M = k;            // 在目标坐标系直接剪切，使用 transform(1, k, 0, 1, 0, 0)
+
+  /* ============================ 字体 ============================ */
+  const face = new FontFace('FZYaSongBold', `url(./Fangzheng.ttf)`);
+  try { await face.load(); document.fonts.add(face); } catch(e) { console.warn('字体加载失败：', e); }
+
+  /* ============================ DOM ============================= */
+  const $grid         = document.getElementById('grid');
+  const $input        = document.getElementById('textInput');
+  const $perGlyph     = document.getElementById('perGlyph');
+  const $kernings     = document.getElementById('kernings');
+  const $yOffsets     = document.getElementById('yOffsets');
+  const $scale        = document.getElementById('scale');
+  const $bgFill       = document.getElementById('bgFill');
+  const $concatWrap   = document.getElementById('concatWrap');
+  const $concatCanvas = document.getElementById('concatCanvas');
+  const $dlConcat     = document.getElementById('downloadConcatBtn');
+
+  function setTileCSS(px){
+    document.documentElement.style.setProperty('--tile', `${px}px`);
+  }
+
+  /* =========================== 事件 ============================= */
+  // 输入文本变化：自动补零数组 + 立即渲染
+  $input.addEventListener('input', ()=>{
+    const text = $input.value || '';
+    const n = [...text].length;
+    if (!$kernings.value.trim()) $kernings.value = Array(Math.max(0, n-1)).fill(0).join(',');
+    if (!$yOffsets.value.trim()) $yOffsets.value = Array(n).fill(0).join(',');
+    render(text);
+  });
+  // 其他控件变化：直接渲染
+  [$perGlyph, $scale, $bgFill].forEach(el=> el.addEventListener('change', ()=>render($input.value)));
+  // 数组输入希望“边输边看效果”
+  [$kernings, $yOffsets].forEach(el=> el.addEventListener('input', ()=>render($input.value)));
+
+  $dlConcat.addEventListener('click', ()=> downloadCanvas($concatCanvas, 'arklogo_concat.png'));
+
+  /* =========================== 工具 ============================= */
+  function createCanvas(w, h){
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.ceil(w));
+    c.height = Math.max(1, Math.ceil(h));
+    return c;
+  }
+  function downloadCanvas(canvas, filename){
+    canvas.toBlob(blob=>{
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a); a.click(); URL.revokeObjectURL(a.href); a.remove();
+    });
+  }
+  function measurer(){
+    const c = document.createElement('canvas').getContext('2d');
+    c.font = `${BASE_FONT_PX}px FZYaSongBold, "Microsoft YaHei", system-ui, serif`;
+    c.textBaseline = 'alphabetic';
+    c.textAlign = 'left';
+    return c;
+  }
+  const mctx = measurer();
+
+  function parseArray(str, targetLen){
+    const arr = (str || '')
+      .split(',')
+      .map(s => Number(s.trim()))
+      .filter(v => Number.isFinite(v));
+    return Array.from({length: targetLen}, (_, i) => arr[i] ?? 0);
+  }
+
+  /* ========== 度量与绘制（直接在目标画布中心绘制，避免裁切） ========== */
+  function computeBox(ch, scalePct){
+    const scale = Math.max(1, Number(scalePct)||100)/100;
+    const sx = (SCALE_X * scale) / 2; // 与旧实现一致：风格缩放并/2
+    const sy = (SCALE_Y * scale) / 2;
+
+    const m = mctx.measureText(ch);
+    let w0 = (m.actualBoundingBoxLeft + m.actualBoundingBoxRight) || m.width || BASE_FONT_PX * 0.7;
+    let h0 = (m.actualBoundingBoxAscent + m.actualBoundingBoxDescent) || BASE_FONT_PX;
+
+    const drawW = Math.max(1, w0 * sx);
+    const drawH = Math.max(1, h0 * sy);
+
+    const shearPadY = Math.abs(SHEAR_M) * (drawW / 2);
+    const shiftPadY = Math.abs(SHIFT_Y);
+    const padX = 12, padY = 12;
+
+    const tileW = Math.ceil(drawW + padX * 2);
+    const tileH = Math.ceil(drawH + shearPadY * 2 + shiftPadY * 2 + padY * 2);
+
+    return { tileW, tileH, sx, sy };
+  }
+
+  // dy：逐字上下微调（px）
+  function drawCharDirect(ctx, ch, box, bgWhite, dy=0){
+    const { tileW, tileH, sx, sy } = box;
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+
+    if(bgWhite){ ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,tileW,tileH); } else { ctx.clearRect(0,0,tileW,tileH); }
+
+    ctx.save();
+    ctx.translate(tileW/2, tileH/2 + SHIFT_Y + (Number(dy)||0));
+    ctx.transform(1, SHEAR_M, 0, 1, 0, 0);  // skewY
+    ctx.scale(sx, sy);
+
+    ctx.fillStyle = '#000000';
+    ctx.font = `${BASE_FONT_PX}px FZYaSongBold, "Microsoft YaHei", system-ui, serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(ch, 0, 0);
+
+    ctx.restore();
+  }
+
+  /* ============================ 渲染 ============================ */
+  function render(text){
+    const chars = [...(text || '')];
+    const perGlyphMode = $perGlyph.checked;
+    const scalePct = Number($scale.value || 100);
+    const bgWhite = $bgFill.value === 'white';
+
+    const n = chars.length;
+    const kernArr = parseArray($kernings.value, Math.max(0, n-1)); // 相邻间距
+    const yArr    = parseArray($yOffsets.value, n);                // 逐字上下
+
+    $grid.innerHTML = '';
+    $concatWrap.style.display = 'none';
+    $dlConcat.style.display = 'none';
+    if(!chars.length) return;
+
+    const boxes = chars.map(ch => computeBox(ch, scalePct));
+    const maxTileW = boxes.reduce((m,b)=>Math.max(m,b.tileW), 0);
+    setTileCSS(maxTileW); // 让网格列宽容纳当前最大字
+
+    if (perGlyphMode) {
+      // 单字输出：每个字一张独立画布 + 独立下载按钮；应用逐字上下偏移
+      chars.forEach((ch, i)=>{
+        const box = boxes[i];
+        const canvas = createCanvas(box.tileW, box.tileH);
+        canvas.className = 'tile';
+        const ctx = canvas.getContext('2d');
+        drawCharDirect(ctx, ch, box, bgWhite, yArr[i] || 0);
+
+        const card = document.createElement('div');
+        card.className = 'card';
+
+        const lab = document.createElement('label');
+        lab.textContent = `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')} — ${ch}`;
+
+        const btn = document.createElement('button');
+        btn.textContent = '下载';
+        btn.addEventListener('click', ()=>{
+          const hex = ch.codePointAt(0).toString(16).toUpperCase().padStart(4,'0');
+          downloadCanvas(canvas, `arklogo_${hex}.png`);
+        });
+
+        card.appendChild(canvas);
+        card.appendChild(lab);
+        card.appendChild(btn);
+        $grid.appendChild(card);
+      });
+    } else {
+      // 拼接：在一张大画布上逐字绘制；步进 = tileW + 对应字距（可为负）
+      const totalW = boxes.reduce((sum,b)=> sum + b.tileW, 0) + kernArr.reduce((s,v)=>s+v,0);
+      const totalH = boxes.reduce((m,b)=> Math.max(m, b.tileH), 0);
+
+      const out = $concatCanvas;
+      out.width = Math.max(1, Math.ceil(totalW));
+      out.height = Math.max(1, Math.ceil(totalH));
+      const ctx = out.getContext('2d');
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+
+      if(bgWhite){ ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,out.width,out.height); } else { ctx.clearRect(0,0,out.width,out.height); }
+
+      let x = 0;
+      chars.forEach((ch, i)=>{
+        const box = boxes[i];
+
+        // 将坐标系移动到当前字符“盒子”的中心（垂直居中），再进行下移/剪切/缩放/绘制
+        ctx.save();
+        const cx = x + box.tileW/2;
+        const cy = out.height/2;
+        ctx.translate(cx, cy);
+        ctx.translate(0, SHIFT_Y + (yArr[i] || 0));
+        ctx.transform(1, SHEAR_M, 0, 1, 0, 0);
+        ctx.scale(box.sx, box.sy);
+
+        ctx.fillStyle = '#000000';
+        ctx.font = `${BASE_FONT_PX}px FZYaSongBold, "Microsoft YaHei", system-ui, serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(ch, 0, 0);
+        ctx.restore();
+
+        // 前进步长
+        if (i < n - 1) x += box.tileW + (kernArr[i] || 0);
+        else x += box.tileW;
+      });
+
+      $concatWrap.style.display = 'flex';
+      $dlConcat.style.display = 'inline-block';
+    }
+  }
+
+  /* ========================== 初始化 ============================ */
+  (function initArraysAndRender(){
+    const text = $input.value || '';
+    const n = [...text].length;
+    if (!$kernings.value.trim()) $kernings.value = Array(Math.max(0, n-1)).fill(0).join(',');
+    if (!$yOffsets.value.trim()) $yOffsets.value = Array(n).fill(0).join(',');
+    render(text);
+  })();
+})();
+</script>
+</body>
+</html>
